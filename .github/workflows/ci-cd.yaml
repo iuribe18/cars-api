@@ -1,0 +1,169 @@
+name: CI/CD Pipeline
+run-name: ${{ github.actor }} is testing out GitHub Actions 🚀
+
+# Controls when the workflow will run
+on:
+    # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# env:
+#   REGION: us-east-1
+#   APP_NAME: api-java
+#   S3_BUCKET: ${{ secrets.S3_BUCKET }}
+#   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+jobs:
+  build:
+    name: Build Java Application
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 12
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'adopt'
+          java-version: '12'
+
+      - name: Replace values in application.yml
+        run: |
+          sed -i "s/CI_PIPELINE_IID/${{ github.run_id }}/" ./src/main/resources/application.yml
+          sed -i "s/CI_COMMIT_SHORT_SHA/${{ github.sha }}/" ./src/main/resources/application.yml
+          sed -i "s/CI_COMMIT_BRANCH/${{ github.ref_name }}/" ./src/main/resources/application.yml
+
+      - name: Build with Gradle
+        run: |
+          chmod +x ./gradlew
+          ./gradlew build
+          ls -l ./build/libs
+          mv ./build/libs/cars-api.jar ./build/libs/cars-api-v${{ github.run_id }}.jar
+          ls -l ./build/libs
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: build
+          path: ./build/libs/cars-api-v${{ github.run_id }}.jar
+
+  smoke_test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: build
+
+      - name: List files to verify artifact download
+        run: ls -lR  # Lista todos los archivos en el directorio de trabajo
+
+      - name: Install curl
+        run: sudo apt-get update && sudo apt-get install -y curl
+
+      - name: Run Smoke Test
+        run: |
+          java -jar ./cars-api-v${{ github.run_id }}.jar &
+          sleep 30
+          curl http://localhost:5000/actuator/health | grep "UP"        
+
+  code_quality:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Set up JDK 12
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'adopt'
+          java-version: '12'
+
+      - name: Run Code Quality Analysis
+        run: |
+          chmod +x ./gradlew
+          ./gradlew pmdMain pmdTest
+
+      - name: Upload PMD Reports
+        uses: actions/upload-artifact@v2
+        with:
+          name: pmd-reports
+          path: build/reports/pmd
+
+  unit_test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Set up JDK 12
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'adopt'
+          java-version: '12'
+
+      - name: Run Unit Tests
+        run: |
+          chmod +x ./gradlew
+          ./gradlew test
+
+      - name: Upload Unit Test Reports
+        uses: actions/upload-artifact@v2
+        with:
+          name: test-reports
+          path: build/reports/tests/
+      
+      - name: Publish Unit Test Results
+        uses: actions/upload-artifact@v2
+        with:
+          name: junit-results
+          path: build/test-results/test/*.xml
+
+#   deploy:
+#     name: Deploy to Elastic Beanstalk
+#     runs-on: ubuntu-latest
+#     needs: [smoke_test, code_quality, unit_test]
+#     steps:
+#       - name: Download build artifact
+#         uses: actions/download-artifact@v2
+#         with:
+#           name: build
+
+#       - name: Install AWS CLI
+#         run: |
+#           sudo apt-get update && sudo apt-get install -y curl jq
+#           curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+#           unzip awscliv2.zip
+#           sudo ./aws/install
+
+#       - name: Configure AWS Credentials
+#         run: |
+#           aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+#           aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+#           aws configure set region $REGION
+
+#       - name: Upload Artifact to S3
+#         run: |
+#           aws s3 cp ./build/libs/cars-api-v${{ github.run_id }}.jar s3://$S3_BUCKET/cars-api-v${{ github.run_id }}.jar
+
+#       - name: Create new Elastic Beanstalk Application Version
+#         run: |
+#           aws elasticbeanstalk create-application-version --application-name $APP_NAME --version-label ${{ github.run_id }} --source-bundle S3Bucket=$S3_BUCKET,S3Key=cars-api-v${{ github.run_id }}.jar
+
+#       - name: Deploy to Elastic Beanstalk Environment
+#         run: |
+#           CNAME=$(aws elasticbeanstalk update-environment --application-name $APP_NAME --environment-name "Development" --version-label=${{ github.run_id }} | jq '.CNAME' --raw-output)
+#           sleep 45
+#           curl http://$CNAME/actuator/info | grep ${{ github.run_id }}
+#           curl http://$CNAME/actuator/health | grep "UP"
